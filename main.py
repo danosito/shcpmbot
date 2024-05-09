@@ -2,8 +2,9 @@ import datetime
 import itertools
 import re
 import logging
+import sqlite3
 
-import mysql.connector
+# import mysql.connector
 import requests
 import telebot
 from telebot import types
@@ -18,7 +19,7 @@ logging.basicConfig(level=logging.DEBUG, filename='logs/' + datetime.datetime.no
 bot = telebot.TeleBot(TOKEN)
 allcommands = [{'/start': 'help'}, {'/login': 'login'}, {'/settings': 'change settings'}]
 bot.set_my_commands([types.BotCommand(command=list(i.keys())[0], description=list(i.values())[0]) for i in allcommands])
-conn = mysql.connector.connect(**db_data)
+# conn = mysql.connector.connect(**db_data)
 
 
 
@@ -40,6 +41,7 @@ def contains_sql_injection_chars(input_str):
 
 
 def find_token(message):
+    conn = sqlite3.connect("legacy-maindb.db")
     userid = message.from_user.id
     cursor = conn.cursor()
     cursor.execute(f'SELECT token, expires, login, password FROM users WHERE userid = {userid}')
@@ -60,7 +62,7 @@ def find_token(message):
 
         access_token = data["data"]["access_token"]
         expires = data["data"]["expires_at"]
-        cursor.execute("UPDATE users SET (token, expires) = (%s, %s) WHERE userid=%s", (access_token, expires, userid))
+        cursor.execute("UPDATE users SET (token, expires) = (?, ?) WHERE userid=?", (access_token, expires, userid))
         conn.commit()
     return token
 
@@ -69,13 +71,14 @@ def find_token(message):
 
 def username_by_id(message: types.Message):
     userid = message.from_user.id
+    conn = sqlite3.connect("legacy-maindb.db")
     cursor = conn.cursor()
     cursor.execute(f'SELECT username FROM users WHERE userid = {userid}')
     resp = cursor.fetchone()[0]
     us = resp
     if not resp:
         us = bot.get_chat_member(userid, userid).user.username
-        cursor.execute('UPDATE users SET username = %s WHERE userid = %s', (us, userid))
+        cursor.execute('UPDATE users SET username = ? WHERE userid = ?', (us, userid))
         conn.commit()
     return us
 
@@ -107,6 +110,7 @@ def handle_link(message):
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
         msg = bot.reply_to(message, "Ищу ответы, подождите...")
+        conn = sqlite3.connect("legacy-maindb.db")
         cursor = conn.cursor()
         datas = response.json()['data']['questions']
         logging.debug(datas)
@@ -207,10 +211,10 @@ def login(message):
     # Получаем user_id
     user_id = message.from_user.id
     user_name = bot.get_chat_member(user_id, user_id).user.username
+    conn = sqlite3.connect("legacy-maindb.db")
     cursor = conn.cursor()
-    print(user_id)
-    cursor.execute("DELETE FROM users WHERE userid=%s", [user_id])
-    cursor.execute("INSERT INTO users (login, password, userid, expires, token, username) VALUES (%s, %s, %s, %s, %s, %s)",
+    cursor.execute("DELETE FROM users WHERE userid=?", [user_id])
+    cursor.execute("INSERT INTO users (login, password, userid, expires, token, username) VALUES (?, ?, ?, ?, ?, ?)",
                    (login, hashed_password, user_id, expires, access_token, user_name))
     bot.reply_to(message, f"Логин {login} успешно зарегистрирован.")
     conn.commit()
@@ -221,11 +225,12 @@ def login(message):
 
 @bot.message_handler(commands=['settings'])
 def settings(message):
+    conn = sqlite3.connect("legacy-maindb.db")
     cur = conn.cursor()
     msg = message.text.split(" ")
     if (len(msg) == 3):
         if (msg[1] == 'html_mode'):
-            cur.execute(f"UPDATE users SET html_mode = %s WHERE userid=%s", (msg[2], message.from_user.id))
+            cur.execute(f"UPDATE users SET html_mode = ? WHERE userid=?", (msg[2], message.from_user.id))
             conn.commit()
             conn.close()
             bot.reply_to(message, "success")

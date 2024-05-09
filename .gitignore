@@ -1,6 +1,6 @@
 logs
 .venv
 test*
-legacy*
+#legacy*
 .idea
 config.py
