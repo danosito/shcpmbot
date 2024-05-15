@@ -8,10 +8,13 @@ def encrypt(s) -> str:
     return hashlib.sha256(t).hexdigest()
 
 
-def decrypt(e: str) -> list:
+def decrypt(e: str):
     iv = bytes(key, 'utf-8')
     encrypted_data = base64.b64decode(e)
     cipher = AES.new(bytes(key, 'utf-8'), AES.MODE_CBC, iv)
     decrypted_data = unpad(cipher.decrypt(encrypted_data), AES.block_size)
-    return eval(
-        decrypted_data.decode('utf-8').replace("null", 'None').replace('false', 'False').replace('true', 'True'))
+    decrypted_data = decrypted_data.decode('utf-8').replace("null", 'None').replace('false', 'False').replace('true', 'True')
+    try:
+        return eval(decrypted_data)
+    except SyntaxError:
+        return decrypted_data
