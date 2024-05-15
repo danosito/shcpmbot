@@ -3,4 +3,5 @@ logs
 test*
 legacy*
 .idea
+__pycache__
 config.py
