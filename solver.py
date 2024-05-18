@@ -20,7 +20,7 @@ def solve(message, a_id, q_id, ans, token):
             return "все ок" if requests.post(f"https://api.matetech.ru/api/public/companies/3/question_attempts/{q_a_id}/answer", json=res, headers=headers).status_code == 200 else "все плохо, пишите @danosito"
         except Exception as e:
             return "возникла ошибка, перешлите @danosito\n" + str(e)
-    elif quest_data['data']['type'] in ['input', 'numeric_input', 'text_input']:
+    elif quest_data['data']['type'] in ['input', 'numeric_input']:
         ans_id = crypter.decrypt(quest_data['data']['answers'])[0]['id']
         res = {"answer": {}}
         res["answer"][ans_id] = ans

@@ -1,3 +1,5 @@
+import asyncio
+
 import datetime
 import itertools
 import re
@@ -91,6 +93,31 @@ def danlogger(message: types.Message, name=None):
     logging.info(msg)
 
 
+async def solve_question(cursor, solve_results, message, attempt_id, i, token, data, datas, c, p, msg, answers):
+    logging.debug("QUESTION: " + str(i))
+    cursor.execute(f"SELECT h_ans, a_ids FROM sharing WHERE q_id = {i['id']}")
+    b = cursor.fetchone()
+    if not b:
+        ans = "У БОТА В БАЗЕ НЕТ ЭТОГО ВОПРОСА"
+        solve_results.append(ans)
+    else:
+        b, machine = b
+        ans = b.replace("<br>", "\n")
+        cursor.execute(f"SELECT html_mode FROM users WHERE userid='{message.from_user.id}'")
+        mode = str(cursor.fetchone()[0])
+        if mode == '0':
+            ans = re.sub(r'<.*?>', '', ans)
+        if (any([i in ans for i in ["UNSUPPORTED", "DONE"]])):
+            ans = "БОТ СЛИШКОМ ГЛУП ЧТОБЫ ЭТО РЕШИТЬ"
+            solve_results.append(ans)
+        else:
+            solve_results.append(solver.solve(message, attempt_id, i['id'], machine, token))
+    logging.debug("ANSWER: " + ans)
+    answers.append(f"{c + 1}.\n" + ans)
+    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.id,
+                          text=f'решаю, решено {c + 1} из {len(data)}, часть {p} из {len(datas)}')
+
+
 
 @bot.message_handler(
     regexp=r'(https://xn--80asehdb.xn----7sb3aehik9cm.xn--p1ai|https://онлайн.школа-цпм.рф)/courses/(\d+)/lesson/(\d+)/test/(\d+)\?attempt_id=(\d+)')
@@ -105,74 +132,56 @@ def handle_link(message):
     except IndexError:
         bot.reply_to(message, "кривая ссылка")
         return
-    url = f"https://api.matetech.ru/api/public/companies/3/test_attempts/{attempt_id}"
     headers = {"Authorization": f"Bearer {token}"}
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        msg = bot.reply_to(message, "Ищу ответы, подождите...")
-        conn = sqlite3.connect("legacy-maindb.db")
-        cursor = conn.cursor()
-        datas = response.json()['data']['questions']
-        logging.debug(datas)
-        datas = crypter.decrypt(datas)
-        logging.debug("DECRYPTED: " + str(datas))
-        res_to_send = ""
-        solve_results = []
-        part_masks = []
-        for p, data in enumerate(datas, start=1):
-            if type(data) == str and data.isdigit():
-                data = datas[data]
-            part_masks.append(len(data))
-            logging.debug(p)
-            answers = []
-            for c, i in enumerate(data):
-                logging.debug("QUESTION: " + str(i))
-                cursor.execute(f"SELECT exact, machine FROM answers WHERE id = {i['id']}")
-                b = cursor.fetchone()
-                if not b:
-                    ans = "У БОТА В БАЗЕ НЕТ ЭТОГО ВОПРОСА"
-                    solve_results.append(ans)
-                else:
-                    b, machine = b
-                    ans = b.replace("<br>", "\n")
-                    cursor.execute(f"SELECT html_mode FROM users WHERE userid='{message.from_user.id}'")
-                    mode = str(cursor.fetchone()[0])
-                    if mode == '0':
-                        ans = re.sub(r'<.*?>', '', ans)
-                    if (any([i in ans for i in ["UNSUPPORTED", "DONE"]])):
-                        ans = "БОТ СЛИШКОМ ГЛУП ЧТОБЫ ЭТО РЕШИТЬ"
-                        solve_results.append(ans)
-                    else:
-                        solve_results.append(solver.solve(message, attempt_id, i['id'], machine, token))
-                logging.debug("ANSWER: " + ans)
-                answers.append(f"{c + 1}.\n" + ans)
-                bot.edit_message_text(chat_id=message.chat.id, message_id=msg.id, text=f'решаю, решено {c + 1} из {len(data)}, часть {p} из {len(datas)}')
-            logging.debug(answers)
-            if (len(datas) > 1):
-                res_to_send += str(p) + " Часть.\n"
-            ansres = "\n\n\n".join(answers)
-            res_to_send += ansres
-        ansres = res_to_send
-        ansrr = [ansres[i * 1000:(i + 1) * 1000] for i in range((len(ansres) + 999) // 1000)]
-        bot.edit_message_text(chat_id=message.chat.id, message_id=msg.id, text=ansrr[0])
-        for i in ansrr[1:]:
-            if(i):
-                bot.reply_to(message, i)
-        masked = [i == "все ок" for i in solve_results]
-        logging.debug(solve_results)
-        part_masks = list(itertools.accumulate(part_masks))
-        solved = []
-        for i, j in enumerate(solve_results, start=1):
-            k = 0
-            while(part_masks[k] < i):
-                k += 1
-            solved.append(f"{k + 1}-{i} : {j}")
-        bot.reply_to(message, f"советуем перепроверить, в тест введено {masked.count(True)} из {len(masked)} ответов\n" + "\n".join(solved))
-        cursor.execute(f"UPDATE users set lastQuery='{datetime.datetime.now()}' WHERE userid='{message.from_user.id}'")
-        conn.commit()
-    else:
+    response = requests.get(f"https://api.matetech.ru/api/public/companies/3/test_attempts/{attempt_id}", headers=headers)
+    if response.status_code != 200:
         bot.reply_to(message,
-                     "ссылка кривая/ попробуйте перелогиниться. Failed to fetch data. Status code: " + str(response.status_code))
+                     "ссылка кривая/ попробуйте перелогиниться. Failed to fetch data. Status code: " + str(
+                         response.status_code))
+        return
+    msg = bot.reply_to(message, "Ищу ответы, подождите...")
+    conn = sqlite3.connect("legacy-maindb.db")
+    cursor = conn.cursor()
+    datas = response.json()['data']['questions']
+    logging.debug(datas)
+    datas = crypter.decrypt(datas)
+    res_to_send = ""
+    solve_results = []
+    part_masks = []
+    for p, data in enumerate(datas, start=1):
+        if type(data) == str and data.isdigit():
+            data = datas[data]
+        part_masks.append(len(data))
+        logging.debug(p)
+        answers = []
+        tasks = []
+        for c, i in enumerate(data):
+            tasks.append(solve_question(cursor, solve_results, message, attempt_id, i, token, data, datas, c, p, msg, answers))
+        asyncio.gather(*tasks)
+        logging.debug(answers)
+        if (len(datas) > 1):
+            res_to_send += str(p) + " Часть.\n"
+        ansres = "\n\n\n".join(answers)
+        res_to_send += ansres
+    ansres = res_to_send
+    ansrr = [ansres[i * 1000:(i + 1) * 1000] for i in range((len(ansres) + 999) // 1000)]
+    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.id, text=ansrr[0])
+    for i in ansrr[1:]:
+        if(i):
+            bot.reply_to(message, i)
+    masked = [i == "все ок" for i in solve_results]
+    logging.debug(solve_results)
+    part_masks = list(itertools.accumulate(part_masks))
+    solved = []
+    for i, j in enumerate(solve_results, start=1):
+        k = 0
+        while(part_masks[k] < i):
+            k += 1
+        solved.append(f"{k + 1}-{i} : {j}")
+    bot.reply_to(message, f"советуем перепроверить, в тест введено {masked.count(True)} из {len(masked)} ответов\n" + "\n".join(solved))
+    cursor.execute(f"UPDATE users set lastQuery='{datetime.datetime.now()}' WHERE userid='{message.from_user.id}'")
+    conn.commit()
+
 
 
 @bot.message_handler(commands=['start'])
