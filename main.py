@@ -1,97 +1,85 @@
 import asyncio
-
 import datetime
 import itertools
 import re
 import logging
 import sqlite3
 
-# import mysql.connector
-import requests
-import telebot
-from telebot import types
+import aiohttp
+from aiogram import Bot, Dispatcher, Router, types
+from aiogram.types import BotCommand, MenuButtonCommands
+from aiogram.filters import Command
 
 import crypter
 import solver
 from config import TOKEN, db_data
 
-
 logging.basicConfig(level=logging.DEBUG, filename='logs/' + datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S') + '.log', filemode='a',
-                    format='%(levelname)s - %(asctime)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S')
-bot = telebot.TeleBot(TOKEN)
+                    format='%(levelname)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S')
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+router = Router()
+
 allcommands = [{'/start': 'help'}, {'/login': 'login'}, {'/settings': 'change settings'}]
-bot.set_my_commands([types.BotCommand(command=list(i.keys())[0], description=list(i.values())[0]) for i in allcommands])
-# conn = mysql.connector.connect(**db_data)
 
-
+async def set_commands(bot: Bot):
+    commands = [BotCommand(command=list(i.keys())[0], description=list(i.values())[0]) for i in allcommands]
+    await bot.set_my_commands(commands)
 
 def is_valid_credentials(login, password):
-    if login and password:
-        return True
-    return False
-
+    return bool(login and password)
 
 def contains_sql_injection_chars(input_str):
-    # Проверка на наличие запрещенных символов
     sql_injection_chars = ["'", ";", "--", "/*", "*/"]
-    for char in sql_injection_chars:
-        if char in input_str:
-            return True
-    if input_str:
-        return False
-    return True
+    return any(char in input_str for char in sql_injection_chars)
 
-
-def find_token(message):
+async def find_token(message):
     conn = sqlite3.connect("legacy-maindb.db")
     userid = message.from_user.id
     cursor = conn.cursor()
     cursor.execute(f'SELECT token, expires, login, password FROM users WHERE userid = {userid}')
     resp = cursor.fetchone()
-    if not (resp):
+    if not resp:
         return None
     logging.debug(resp)
     token, expires, email, password = resp
     if datetime.datetime.now() > datetime.datetime.strptime(expires, "%Y-%m-%d %H:%M:%S"):
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://api.matetech.ru/api/public/companies/3/login",
+                                    json={"email": email, "password": password}) as response:
+                data = await response.json()
 
-        response = requests.post("https://api.matetech.ru/api/public/companies/3/login",
-                                 json={"email": email, "password": password})
-
-        data = response.json()
         if "data" not in data or "access_token" not in data["data"]:
-            bot.reply_to(message, "Неправильный логин или пароль. залогиньтесь снова")
+            await message.reply("Неправильный логин или пароль. Залогиньтесь снова")
             return
 
         access_token = data["data"]["access_token"]
         expires = data["data"]["expires_at"]
-        cursor.execute("UPDATE users SET (token, expires) = (?, ?) WHERE userid=?", (access_token, expires, userid))
+        cursor.execute("UPDATE users SET token=?, expires=? WHERE userid=?", (access_token, expires, userid))
         conn.commit()
     return token
 
-
-
-
-def username_by_id(message: types.Message):
+async def username_by_id(message: types.Message):
     userid = message.from_user.id
     conn = sqlite3.connect("legacy-maindb.db")
     cursor = conn.cursor()
     cursor.execute(f'SELECT username FROM users WHERE userid = {userid}')
-    resp = cursor.fetchone()[0]
-    us = resp
-    if not resp:
-        us = bot.get_chat_member(userid, userid).user.username
+    resp = cursor.fetchone()
+    us = resp[0] if resp else None
+    if not us:
+        user = await bot.get_chat_member(userid, userid)
+        us = user.user.username
         cursor.execute('UPDATE users SET username = ? WHERE userid = ?', (us, userid))
         conn.commit()
     return us
 
-
-def danlogger(message: types.Message, name=None):
-    msg = ""
-    for i in [str(i) for i in [datetime.datetime.now(), name if name else username_by_id(message), message.text]]:
-        msg += i + ' '
+async def danlogger(message: types.Message, name=None):
+    if name is None:
+        name = await username_by_id(message)
+    msg = " ".join([str(i) for i in [datetime.datetime.now(), name, message.text]])
     print(msg)
     logging.info(msg)
-
 
 async def solve_question(cursor, solve_results, message, attempt_id, i, token, data, datas, c, p, msg, answers):
     logging.debug("QUESTION: " + str(i))
@@ -99,7 +87,7 @@ async def solve_question(cursor, solve_results, message, attempt_id, i, token, d
     b = cursor.fetchone()
     if not b:
         ans = "У БОТА В БАЗЕ НЕТ ЭТОГО ВОПРОСА"
-        solve_results.append(ans)
+        solve_results[c][p] = ans
     else:
         b, machine = b
         ans = b.replace("<br>", "\n")
@@ -107,109 +95,42 @@ async def solve_question(cursor, solve_results, message, attempt_id, i, token, d
         mode = str(cursor.fetchone()[0])
         if mode == '0':
             ans = re.sub(r'<.*?>', '', ans)
-        if (any([i in ans for i in ["UNSUPPORTED", "DONE"]])):
+        if any(i in ans for i in ["UNSUPPORTED", "DONE"]):
             ans = "БОТ СЛИШКОМ ГЛУП ЧТОБЫ ЭТО РЕШИТЬ"
-            solve_results.append(ans)
+            solve_results[p][c] = ans
         else:
-            solve_results.append(solver.solve(message, attempt_id, i['id'], machine, token))
+            async with aiohttp.ClientSession() as session:
+                solve_results[p][c] = (await solver.solve(message, attempt_id, i['id'], machine, token, session))
     logging.debug("ANSWER: " + ans)
     answers.append(f"{c + 1}.\n" + ans)
-    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.id,
-                          text=f'решаю, решено {c + 1} из {len(data)}, часть {p} из {len(datas)}')
+    await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                text=f'решаю, решено {c + 1} из {len(data)}, часть {p + 1} из {len(datas)}')
 
+@router.message(Command(commands=['start']))
+async def start(message: types.Message):
+    await bot.set_chat_menu_button(chat_id=message.chat.id, menu_button=MenuButtonCommands('commands'))
+    await message.reply("Привет мир! Для входа введите /login логин пароль.")
 
-
-@bot.message_handler(
-    regexp=r'(https://xn--80asehdb.xn----7sb3aehik9cm.xn--p1ai|https://онлайн.школа-цпм.рф)/courses/(\d+)/lesson/(\d+)/test/(\d+)\?attempt_id=(\d+)')
-def handle_link(message):
-    token = find_token(message)
-    if not token:
-        bot.reply_to(message, "для этого вы должны залогиниться (/login)")
-        return
-    danlogger(message)
-    try:
-        attempt_id = message.text.split("=")[1].split("&")[0]
-    except IndexError:
-        bot.reply_to(message, "кривая ссылка")
-        return
-    headers = {"Authorization": f"Bearer {token}"}
-    response = requests.get(f"https://api.matetech.ru/api/public/companies/3/test_attempts/{attempt_id}", headers=headers)
-    if response.status_code != 200:
-        bot.reply_to(message,
-                     "ссылка кривая/ попробуйте перелогиниться. Failed to fetch data. Status code: " + str(
-                         response.status_code))
-        return
-    msg = bot.reply_to(message, "Ищу ответы, подождите...")
-    conn = sqlite3.connect("legacy-maindb.db")
-    cursor = conn.cursor()
-    datas = response.json()['data']['questions']
-    logging.debug(datas)
-    datas = crypter.decrypt(datas)
-    res_to_send = ""
-    solve_results = []
-    part_masks = []
-    for p, data in enumerate(datas, start=1):
-        if type(data) == str and data.isdigit():
-            data = datas[data]
-        part_masks.append(len(data))
-        logging.debug(p)
-        answers = []
-        tasks = []
-        for c, i in enumerate(data):
-            tasks.append(solve_question(cursor, solve_results, message, attempt_id, i, token, data, datas, c, p, msg, answers))
-        asyncio.gather(*tasks)
-        logging.debug(answers)
-        if (len(datas) > 1):
-            res_to_send += str(p) + " Часть.\n"
-        ansres = "\n\n\n".join(answers)
-        res_to_send += ansres
-    ansres = res_to_send
-    ansrr = [ansres[i * 1000:(i + 1) * 1000] for i in range((len(ansres) + 999) // 1000)]
-    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.id, text=ansrr[0])
-    for i in ansrr[1:]:
-        if(i):
-            bot.reply_to(message, i)
-    masked = [i == "все ок" for i in solve_results]
-    logging.debug(solve_results)
-    part_masks = list(itertools.accumulate(part_masks))
-    solved = []
-    for i, j in enumerate(solve_results, start=1):
-        k = 0
-        while(part_masks[k] < i):
-            k += 1
-        solved.append(f"{k + 1}-{i} : {j}")
-    bot.reply_to(message, f"советуем перепроверить, в тест введено {masked.count(True)} из {len(masked)} ответов\n" + "\n".join(solved))
-    cursor.execute(f"UPDATE users set lastQuery='{datetime.datetime.now()}' WHERE userid='{message.from_user.id}'")
-    conn.commit()
-
-
-
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.set_chat_menu_button(message.chat.id, types.MenuButtonCommands('commands'))
-    bot.reply_to(message, "Привет мир! Для входа введите /login логин пароль.")
-
-
-@bot.message_handler(commands=['login'])
-def login(message):
+@router.message(Command(commands=['login']))
+async def login(message: types.Message):
     if message.text.count(" ") != 2:
-        bot.reply_to(message, "Неправильный формат логина или пароля. (/login login password)")
+        await message.reply("Неправильный формат логина или пароля. (/login login password)")
         return
     _, login, password = message.text.split()
     logging.debug(login + password)
     if contains_sql_injection_chars(login) or contains_sql_injection_chars(password):
-        bot.reply_to(message,
-                     "Неправильный формат логина или пароля. (/login login password), не пытайтесь взломать систему:)")
+        await message.reply("Неправильный формат логина или пароля. (/login login password), не пытайтесь взломать систему:)")
         return
-    response = requests.post("https://api.matetech.ru/api/public/companies/3/login",
-                             json={"email": login, "password": password})
-    logging.debug(response)
-    if response.status_code != 200:
-        bot.reply_to(message, "Неправильный логин или пароль.")
-        return
-    data = response.json()
+    async with aiohttp.ClientSession() as session:
+        async with session.post("https://api.matetech.ru/api/public/companies/3/login",
+                                json={"email": login, "password": password}) as response:
+            if response.status != 200:
+                await message.reply("Неправильный логин или пароль.")
+                return
+            data = await response.json()
+
     if "data" not in data or "access_token" not in data["data"]:
-        bot.reply_to(message, "Неправильный логин или пароль.")
+        await message.reply("Неправильный логин или пароль.")
         return
 
     access_token = data["data"]["access_token"]
@@ -217,41 +138,92 @@ def login(message):
 
     hashed_password = password
 
-    # Получаем user_id
     user_id = message.from_user.id
-    user_name = bot.get_chat_member(user_id, user_id).user.username
+    user_name = (await bot.get_chat_member(user_id, user_id)).user.username
     conn = sqlite3.connect("legacy-maindb.db")
     cursor = conn.cursor()
     cursor.execute("DELETE FROM users WHERE userid=?", [user_id])
     cursor.execute("INSERT INTO users (login, password, userid, expires, token, username) VALUES (?, ?, ?, ?, ?, ?)",
                    (login, hashed_password, user_id, expires, access_token, user_name))
-    bot.reply_to(message, f"Логин {login} успешно зарегистрирован.")
+    await message.reply(f"Логин {login} успешно зарегистрирован.")
     conn.commit()
-    danlogger(message, name=user_name)
+    await danlogger(message, name=user_name)
 
-
-
-
-@bot.message_handler(commands=['settings'])
-def settings(message):
+@router.message(Command(commands=['settings']))
+async def settings(message: types.Message):
     conn = sqlite3.connect("legacy-maindb.db")
     cur = conn.cursor()
     msg = message.text.split(" ")
-    if (len(msg) == 3):
-        if (msg[1] == 'html_mode'):
-            cur.execute(f"UPDATE users SET html_mode = ? WHERE userid=?", (msg[2], message.from_user.id))
+    if len(msg) == 3:
+        if msg[1] == 'html_mode':
+            cur.execute("UPDATE users SET html_mode = ? WHERE userid=?", (msg[2], message.from_user.id))
             conn.commit()
             conn.close()
-            bot.reply_to(message, "success")
+            await message.reply("success")
         else:
-            bot.reply_to(message, "такого параметра пока нет")
+            await message.reply("такого параметра пока нет")
     else:
-        bot.reply_to(message, "/settings параметр значение")
+        await message.reply("/settings параметр значение")
 
+@router.message(lambda message: re.match(r'(https://xn--80asehdb.xn----7sb3aehik9cm.xn--p1ai|https://онлайн.школа-цпм.рф)/courses/(\d+)/lesson/(\d+)/test/(\d+)\?attempt_id=(\d+)', message.text))
+async def handle_link(message: types.Message):
+    token = await find_token(message)
+    if not token:
+        await message.reply("Для этого вы должны залогиниться (/login)")
+        return
+    await danlogger(message)
+    try:
+        attempt_id = message.text.split("=")[1].split("&")[0]
+    except IndexError:
+        await message.reply("Кривая ссылка")
+        return
+    headers = {"Authorization": f"Bearer {token}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"https://api.matetech.ru/api/public/companies/3/test_attempts/{attempt_id}", headers=headers) as response:
+            if response.status != 200:
+                await message.reply("Ссылка кривая/ попробуйте перелогиниться. Failed to fetch data. Status code: " + str(response.status))
+                return
+            data = await response.json()
 
-@bot.message_handler(func=lambda message: True)
-def handle_invalid_links(message):
-    bot.reply_to(message, "Неправильный формат ссылки.")
+    msg = await message.reply("Ищу ответы, подождите...")
+    conn = sqlite3.connect("legacy-maindb.db")
+    cursor = conn.cursor()
+    datas = data['data']['questions']
+    logging.debug(datas)
+    datas = crypter.decrypt(datas)
+    res_to_send = ""
+    solve_results = {}
+    part_masks = []
+    for p, data in enumerate(datas):
+        if type(data) == str and data.isdigit():
+            data = datas[data]
+        answers = []
+        tasks = []
+        part_masks.append(len(data))
+        for c, question in enumerate(data):
+            solve_results[p] = {}
+            tasks.append(solve_question(cursor, solve_results, message, attempt_id, question, token, data, datas, c, p, msg, answers))
+        await asyncio.gather(*tasks)
+        res_to_send += "\n\n".join(answers) + "\n\n"
+    res_all = [res_to_send[i * 4096:(i + 1) * 4096] for i in range(len(res_to_send) // 4096 + 1)]
+    await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id, text=res_all[0])
+    for res in res_all[1:]:
+        if res:
+            await message.reply(res)
+    solved = []
+    for i in sorted(solve_results):
+        for j in sorted(solve_results[i]):
+            solved.append(f"{i + 1}-{j + 1} : {solve_results[i][j]}")
+    await message.reply(f"советуем перепроверить, в тест введено {"".join(solved).count("все ок")} из {len(solve_results)} ответов\n" + "\n".join(solved))
 
+@router.message()
+async def handle_invalid_links(message: types.Message):
+    await message.reply("Неправильный формат ссылки.")
 
-bot.infinity_polling()
+async def main():
+    await set_commands(bot)
+    dp.include_router(router)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
