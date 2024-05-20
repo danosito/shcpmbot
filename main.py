@@ -108,7 +108,7 @@ async def solve_question(cursor, solve_results, message, attempt_id, i, token, d
 
 @router.message(Command(commands=['start']))
 async def start(message: types.Message):
-    await bot.set_chat_menu_button(chat_id=message.chat.id, menu_button=MenuButtonCommands('commands'))
+    await bot.set_chat_menu_button(chat_id=message.chat.id, menu_button=MenuButtonCommands())
     await message.reply("Привет мир! Для входа введите /login логин пароль.")
 
 @router.message(Command(commands=['login']))
@@ -214,7 +214,7 @@ async def handle_link(message: types.Message):
     for i in sorted(solve_results):
         for j in sorted(solve_results[i]):
             solved.append(f"{i + 1}-{j + 1} : {solve_results[i][j]}")
-    await message.reply(f"советуем перепроверить, в тест введено {"".join(solved).count("все ок")} из {len(solve_results)} ответов\n" + "\n".join(solved))
+    await message.reply(f"советуем перепроверить, в тест введено {"".join(solved).count("все ок")} из {len(solved)} ответов\n" + "\n".join(solved))
 
 @router.message()
 async def handle_invalid_links(message: types.Message):
