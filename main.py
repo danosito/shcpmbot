@@ -101,7 +101,7 @@ async def solve_question(cursor, solve_results, message, attempt_id, i, token, d
             async with aiohttp.ClientSession() as session:
                 solve_results[p][c] = (await solver.solve(message, attempt_id, i['id'], machine, token, session))
     logging.debug("ANSWER: " + ans)
-    answers[p][c](f"{c + 1}.\n" + ans)
+    answers[p][c] = (f"{c + 1}.\n" + ans)
     await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
                                 text=f'решаю, решено {c + 1} из {len(data)}, часть {p + 1} из {len(datas)}')
 
