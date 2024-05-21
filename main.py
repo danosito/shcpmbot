@@ -216,7 +216,7 @@ async def handle_link(message: types.Message):
     for i in sorted(solve_results):
         for j in sorted(solve_results[i]):
             solved.append(f"{i + 1}-{j + 1} : {solve_results[i][j]}")
-    await message.reply("советуем перепроверить, в тест введено" + str("".join(solved).count("все ок")) + " из " + str(len(solved)) + " ответов\n" + "\n".join(solved))
+    await message.reply("советуем перепроверить, в тест введено " + str("".join(solved).count("все ок")) + " из " + str(len(solved)) + " ответов\n" + "\n".join(solved))
 
 @router.message()
 async def handle_invalid_links(message: types.Message):
