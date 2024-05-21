@@ -42,7 +42,6 @@ async def find_token(message):
     resp = cursor.fetchone()
     if not resp:
         return None
-    logging.debug(resp)
     token, expires, email, password = resp
     if datetime.datetime.now() > datetime.datetime.strptime(expires, "%Y-%m-%d %H:%M:%S"):
         async with aiohttp.ClientSession() as session:
@@ -102,7 +101,7 @@ async def solve_question(cursor, solve_results, message, attempt_id, i, token, d
             async with aiohttp.ClientSession() as session:
                 solve_results[p][c] = (await solver.solve(message, attempt_id, i['id'], machine, token, session))
     logging.debug("ANSWER: " + ans)
-    answers.append(f"{c + 1}.\n" + ans)
+    answers[p][c](f"{c + 1}.\n" + ans)
     await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
                                 text=f'решаю, решено {c + 1} из {len(data)}, часть {p + 1} из {len(datas)}')
 
@@ -193,18 +192,21 @@ async def handle_link(message: types.Message):
     datas = crypter.decrypt(datas)
     res_to_send = ""
     solve_results = {}
+    answers = {}
     part_masks = []
     for p, data in enumerate(datas):
         if type(data) == str and data.isdigit():
             data = datas[data]
-        answers = []
+
         tasks = []
         part_masks.append(len(data))
         for c, question in enumerate(data):
             solve_results[p] = {}
+            answers[p] = {}
             tasks.append(solve_question(cursor, solve_results, message, attempt_id, question, token, data, datas, c, p, msg, answers))
         await asyncio.gather(*tasks)
-        res_to_send += "\n\n".join(answers) + "\n\n"
+        answers[p] = [value for key, value in sorted(answers[p].items())]
+        res_to_send += "\n\n".join(answers[p]) + "\n\n"
     res_all = [res_to_send[i * 4096:(i + 1) * 4096] for i in range(len(res_to_send) // 4096 + 1)]
     await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id, text=res_all[0])
     for res in res_all[1:]:
