@@ -229,7 +229,11 @@ async def handle_link(message: types.Message):
     cursor = conn.cursor()
     datas = data['data']['questions']
     logging.debug(datas)
-    datas = crypter.decrypt(datas, key)
+    try:
+        datas = crypter.decrypt(datas, key)
+    except Exception as e:
+        await message.reply("плохой ключ, не могу расшифровать:(")
+        return
     res_to_send = ""
     solve_results = {}
     answers = {}
